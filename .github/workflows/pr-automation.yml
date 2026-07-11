@@ -56,7 +56,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          pr_json="$(gh pr view "${{ steps.pr.outputs.number }}" --json headRefName,mergeable,mergeStateStatus,isCrossRepository,isDraft,title,state)"
+          pr_json="$(gh pr view "${{ steps.pr.outputs.number }}" --json headRefName,mergeable,mergeStateStatus,isCrossRepository,isDraft,title,state,labels)"
           echo "head_ref=$(echo "$pr_json" | jq -r '.headRefName')" >> "$GITHUB_OUTPUT"
           echo "mergeable=$(echo "$pr_json" | jq -r '.mergeable')" >> "$GITHUB_OUTPUT"
           echo "merge_state=$(echo "$pr_json" | jq -r '.mergeStateStatus')" >> "$GITHUB_OUTPUT"
@@ -69,14 +69,22 @@ jobs:
             echo "should_automate=false" >> "$GITHUB_OUTPUT"
           elif [[ "$(echo "$pr_json" | jq -r '.isCrossRepository')" == "true" ]]; then
             echo "should_automate=false" >> "$GITHUB_OUTPUT"
+          elif echo "$pr_json" | jq -e '[.labels[].name] | index("fail-safe:blocked")' >/dev/null; then
+            echo "should_automate=false" >> "$GITHUB_OUTPUT"
+            echo "blocked_by_failsafe=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_automate=true" >> "$GITHUB_OUTPUT"
+            echo "blocked_by_failsafe=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Skip ineligible PRs
         if: steps.meta.outputs.should_automate != 'true'
         run: |
-          echo "Skipping automation (state=${{ steps.meta.outputs.state }}, cross_repo=${{ steps.meta.outputs.is_cross_repo }})."
+          if [[ "${{ steps.meta.outputs.blocked_by_failsafe }}" == "true" ]]; then
+            echo "Skipping automation: fail-safe:blocked label is present."
+          else
+            echo "Skipping automation (state=${{ steps.meta.outputs.state }}, cross_repo=${{ steps.meta.outputs.is_cross_repo }})."
+          fi
 
       - name: Mark draft PR ready for review
         if: steps.meta.outputs.should_automate == 'true' && steps.meta.outputs.is_draft == 'true' && github.event_name != 'check_suite'
