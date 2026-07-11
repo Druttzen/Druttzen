@@ -1,0 +1,14 @@
+---
+description: Guidance for Cursor Automations running on this repository
+globs:
+alwaysApply: true
+---
+
+# Automation context
+
+This is a GitHub profile repository (`Druttzen/Druttzen`). It has no application code.
+
+When triggered by an automation:
+- Do not invent bugs or changes where none exist.
+- If the task requires code changes, confirm the correct target repository first.
+- Prefer linking to the user's actual project repos instead of editing this profile README unless explicitly asked.
