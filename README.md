@@ -62,6 +62,13 @@ sequenceDiagram
 
 **Credential handling:** Store `CURSOR_AUTOMATION_WEBHOOK_URL` and `CURSOR_AUTOMATION_API_KEY` in your platform's secrets manager (GitHub Actions secrets, AWS Secrets Manager, Vault, etc.). Avoid exporting them in shell history, committing them to git, or logging them in CI output. Rotate the API key from [cursor.com/automations](https://cursor.com/automations) if it is ever exposed.
 
+**Timeouts:** Override relay timeouts (seconds) if needed:
+
+```bash
+export CURSOR_AUTOMATION_CONNECT_TIMEOUT=5
+export CURSOR_AUTOMATION_MAX_TIME=15
+```
+
 **Temporary workaround:** Manually repost the alert from a human Slack account.
 
 ### 4. Teammates cannot follow up in automation threads

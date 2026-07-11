@@ -17,6 +17,10 @@
 #   ALERT_SEVERITY=critical ALERT_SERVICE=payments ALERT_ENVIRONMENT=production \
 #     ./scripts/relay-slack-alert-to-cursor.sh "checkout timeout"
 #
+# Optional timeout overrides (seconds):
+#   CURSOR_AUTOMATION_CONNECT_TIMEOUT=5
+#   CURSOR_AUTOMATION_MAX_TIME=15
+#
 # Get the webhook URL and API key from cursor.com/automations after saving a Webhook trigger.
 
 set -euo pipefail
@@ -43,7 +47,7 @@ build_prompt() {
   service="${3:-}"
   environment="${4:-}"
 
-  jq -n \
+  jq -nr \
     --arg message "$message" \
     --arg severity "$severity" \
     --arg service "$service" \
@@ -97,9 +101,27 @@ fi
 
 payload="$(jq -n --arg prompt "$prompt" '{prompt: $prompt}')"
 
-curl -fsS -X POST "$CURSOR_AUTOMATION_WEBHOOK_URL" \
-  -H "Authorization: Bearer $CURSOR_AUTOMATION_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "$payload"
+http_status="$(
+  curl -sS \
+    --connect-timeout "${CURSOR_AUTOMATION_CONNECT_TIMEOUT:-5}" \
+    --max-time "${CURSOR_AUTOMATION_MAX_TIME:-15}" \
+    -w '%{http_code}' \
+    -o /dev/null \
+    -X POST "$CURSOR_AUTOMATION_WEBHOOK_URL" \
+    -H "Authorization: Bearer $CURSOR_AUTOMATION_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$payload"
+)"
+curl_exit_code=$?
 
-echo "Relayed alert to Cursor automation webhook."
+if [[ $curl_exit_code -ne 0 ]]; then
+  echo "Error: Failed to relay alert to Cursor automation webhook (curl exit code: $curl_exit_code)." >&2
+  exit 1
+fi
+
+if [[ "$http_status" -lt 200 || "$http_status" -ge 300 ]]; then
+  echo "Error: Cursor automation webhook returned non-success HTTP status: $http_status." >&2
+  exit 1
+fi
+
+echo "Relayed alert to Cursor automation webhook (HTTP $http_status)."
