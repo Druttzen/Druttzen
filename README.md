@@ -32,6 +32,36 @@ export CURSOR_AUTOMATION_API_KEY="your-api-key"
 ./scripts/relay-slack-alert-to-cursor.sh "Production error: checkout timeout"
 ```
 
+Structured alerts with metadata:
+
+```bash
+./scripts/relay-slack-alert-to-cursor.sh --json <<'EOF'
+{"message":"checkout timeout","severity":"critical","service":"payments","environment":"production"}
+EOF
+```
+
+Or pass metadata via environment variables:
+
+```bash
+ALERT_SEVERITY=critical ALERT_SERVICE=payments ALERT_ENVIRONMENT=production \
+  ./scripts/relay-slack-alert-to-cursor.sh "checkout timeout"
+```
+
+```mermaid
+sequenceDiagram
+  actor MonitoringSystem
+  participant RelayScript as relay-slack-alert-to-cursor.sh
+  participant CursorWebhook as Cursor_automations_webhook
+
+  MonitoringSystem->>RelayScript: relay-slack-alert-to-cursor.sh "Alert text"
+  RelayScript->>RelayScript: validate jq, curl, and credentials
+  RelayScript->>CursorWebhook: POST JSON prompt to webhook URL
+  CursorWebhook-->>RelayScript: 200 OK
+  RelayScript-->>MonitoringSystem: Relay confirmation
+```
+
+**Credential handling:** Store `CURSOR_AUTOMATION_WEBHOOK_URL` and `CURSOR_AUTOMATION_API_KEY` in your platform's secrets manager (GitHub Actions secrets, AWS Secrets Manager, Vault, etc.). Avoid exporting them in shell history, committing them to git, or logging them in CI output. Rotate the API key from [cursor.com/automations](https://cursor.com/automations) if it is ever exposed.
+
 **Temporary workaround:** Manually repost the alert from a human Slack account.
 
 ### 4. Teammates cannot follow up in automation threads
