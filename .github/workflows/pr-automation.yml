@@ -1,0 +1,174 @@
+name: PR Automation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+  check_suite:
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to automate
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: pr-automation-${{ github.event.pull_request.number || github.event.check_suite.head_branch || inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  automate:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'check_suite' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "number=${{ inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "check_suite" ]]; then
+            branch="${{ github.event.check_suite.head_branch }}"
+            number="$(gh pr list --head "$branch" --state open --json number -q '.[0].number')"
+            if [[ -z "$number" || "$number" == "null" ]]; then
+              echo "No open PR found for branch $branch"
+              exit 0
+            fi
+            echo "number=$number" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get PR metadata
+        id: meta
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr_json="$(gh pr view "${{ steps.pr.outputs.number }}" --json headRefName,mergeable,mergeStateStatus,isCrossRepository,isDraft,title,state)"
+          echo "head_ref=$(echo "$pr_json" | jq -r '.headRefName')" >> "$GITHUB_OUTPUT"
+          echo "mergeable=$(echo "$pr_json" | jq -r '.mergeable')" >> "$GITHUB_OUTPUT"
+          echo "merge_state=$(echo "$pr_json" | jq -r '.mergeStateStatus')" >> "$GITHUB_OUTPUT"
+          echo "is_cross_repo=$(echo "$pr_json" | jq -r '.isCrossRepository')" >> "$GITHUB_OUTPUT"
+          echo "is_draft=$(echo "$pr_json" | jq -r '.isDraft')" >> "$GITHUB_OUTPUT"
+          echo "title=$(echo "$pr_json" | jq -r '.title')" >> "$GITHUB_OUTPUT"
+          echo "state=$(echo "$pr_json" | jq -r '.state')" >> "$GITHUB_OUTPUT"
+
+          if [[ "$(echo "$pr_json" | jq -r '.state')" != "OPEN" ]]; then
+            echo "should_automate=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$(echo "$pr_json" | jq -r '.isCrossRepository')" == "true" ]]; then
+            echo "should_automate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_automate=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip ineligible PRs
+        if: steps.meta.outputs.should_automate != 'true'
+        run: |
+          echo "Skipping automation (state=${{ steps.meta.outputs.state }}, cross_repo=${{ steps.meta.outputs.is_cross_repo }})."
+
+      - name: Mark draft PR ready for review
+        if: steps.meta.outputs.should_automate == 'true' && steps.meta.outputs.is_draft == 'true' && github.event_name != 'check_suite'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr ready "${{ steps.pr.outputs.number }}"
+          echo "Marked PR #${{ steps.pr.outputs.number }} as ready for review."
+
+      - name: Checkout PR branch
+        if: steps.meta.outputs.should_automate == 'true' && github.event_name != 'check_suite'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Auto-resolve conflicts with main
+        id: resolve
+        if: steps.meta.outputs.should_automate == 'true' && github.event_name != 'check_suite'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main
+          resolved="false"
+
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "Branch already contains latest main."
+          elif git merge origin/main --no-edit; then
+            echo "Merged main without conflicts."
+            resolved="true"
+          else
+            echo "Conflicts detected. Keeping PR branch versions."
+            while IFS= read -r file; do
+              [[ -z "$file" ]] && continue
+              git checkout --ours "$file"
+              git add "$file"
+            done < <(git diff --name-only --diff-filter=U)
+            git commit --no-edit -m "Auto-resolve merge conflicts with main (keep PR branch)"
+            resolved="true"
+          fi
+
+          if [[ "$resolved" == "true" ]]; then
+            git push origin "HEAD:${{ steps.meta.outputs.head_ref }}"
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Wait for mergeable PR
+        if: steps.meta.outputs.should_automate == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr="${{ steps.pr.outputs.number }}"
+          for attempt in $(seq 1 30); do
+            state="$(gh pr view "$pr" --json mergeable,mergeStateStatus -q '.mergeStateStatus')"
+            mergeable="$(gh pr view "$pr" --json mergeable,mergeStateStatus -q '.mergeable')"
+            echo "Attempt $attempt: mergeStateStatus=$state mergeable=$mergeable"
+            if [[ "$mergeable" == "MERGEABLE" && "$state" != "DIRTY" && "$state" != "BEHIND" && "$state" != "DRAFT" ]]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "PR is not mergeable yet."
+          exit 1
+
+      - name: Auto-merge PR
+        if: steps.meta.outputs.should_automate == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge "${{ steps.pr.outputs.number }}" \
+            --merge \
+            --delete-branch \
+            --subject "Merge pull request #${{ steps.pr.outputs.number }} from ${{ steps.meta.outputs.head_ref }}" \
+            --body "Automated merge by PR Automation workflow."
+
+      - name: Comment on successful automation
+        if: success() && steps.meta.outputs.should_automate == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          body="PR Automation completed for **${{ steps.meta.outputs.title }}**."
+          if [[ "${{ steps.resolve.outputs.pushed || 'false' }}" == "true" ]]; then
+            body="${body}
+
+          - Auto-resolved conflicts with \`main\` (kept PR branch changes)"
+          fi
+          body="${body}
+          - Marked ready for review (if draft)
+          - Auto-merged into \`main\`"
+          gh pr comment "${{ steps.pr.outputs.number }}" --body "$body" || true
