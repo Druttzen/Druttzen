@@ -71,6 +71,37 @@ export CURSOR_AUTOMATION_MAX_TIME=15
 
 **Temporary workaround:** Manually repost the alert from a human Slack account.
 
+### Fail-safe bot
+
+Use the fail-safe wrapper for retries, circuit breaking, and dead-letter logging:
+
+```bash
+# Relay with automatic retries and optional fallback webhook
+./scripts/fail-safe-bot.sh relay "Production error: checkout timeout"
+
+# Wrap any command
+./scripts/fail-safe-bot.sh run ./scripts/relay-slack-alert-to-cursor.sh "alert text"
+
+# Inspect or reset circuit breaker
+./scripts/fail-safe-bot.sh status
+./scripts/fail-safe-bot.sh reset
+```
+
+Optional fallback env vars:
+
+```bash
+export FAILSAFE_FALLBACK_WEBHOOK_URL="https://api.cursor.com/automations/webhook/..."
+export FAILSAFE_FALLBACK_API_KEY="your-fallback-key"
+```
+
+**PR automation fail-safe:** When PR Automation fails, the `Auto Fail-Safe Bot` workflow:
+
+1. Adds `fail-safe:blocked` to stop unsafe auto-merge
+2. Comments recovery steps on the PR
+3. Retries automation once after a short delay
+
+Remove `fail-safe:blocked` when the PR is safe to automate again.
+
 ### 4. Teammates cannot follow up in automation threads
 
 **Cause:** Known bug — Team Followups does not apply to agents created by automations.

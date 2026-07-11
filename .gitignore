@@ -1,0 +1,3 @@
+.failsafe/state.json
+.failsafe/dead-letter/*
+!.failsafe/.gitkeep

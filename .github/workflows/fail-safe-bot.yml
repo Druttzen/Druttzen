@@ -1,0 +1,119 @@
+name: Auto Fail-Safe Bot
+
+on:
+  workflow_run:
+    workflows: [PR Automation]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to protect
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  fail-safe:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.pr_number }}" ]]; then
+            echo "number=${{ inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          run_id="${{ github.event.workflow_run.id }}"
+          run_json="$(gh api "repos/${{ github.repository }}/actions/runs/${run_id}")"
+          event="${{ github.event.workflow_run.event }}"
+          head_branch="$(echo "$run_json" | jq -r '.head_branch')"
+
+          if [[ "$event" == "pull_request" ]]; then
+            number="$(gh pr list --head "$head_branch" --state open --json number -q '.[0].number')"
+          else
+            number="$(gh pr list --head "$head_branch" --state open --json number -q '.[0].number')"
+          fi
+
+          if [[ -z "$number" || "$number" == "null" ]]; then
+            echo "No open PR found for failed workflow on branch $head_branch"
+            exit 0
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Load failure context
+        id: context
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr="${{ steps.pr.outputs.number }}"
+          pr_json="$(gh pr view "$pr" --json title,url,headRefName,labels)"
+          echo "title=$(echo "$pr_json" | jq -r '.title')" >> "$GITHUB_OUTPUT"
+          echo "url=$(echo "$pr_json" | jq -r '.url')" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$(echo "$pr_json" | jq -r '.headRefName')" >> "$GITHUB_OUTPUT"
+
+          run_id="${{ github.event.workflow_run.id }}"
+          if [[ -n "$run_id" ]]; then
+            echo "run_url=https://github.com/${{ github.repository }}/actions/runs/${run_id}" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_url=manual-trigger" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Block unsafe auto-merge
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr="${{ steps.pr.outputs.number }}"
+          gh pr edit "$pr" --add-label "fail-safe:blocked" || \
+            gh label create "fail-safe:blocked" --color "B60205" --description "Auto-merge blocked by fail-safe bot" && \
+            gh pr edit "$pr" --add-label "fail-safe:blocked"
+          gh pr ready "$pr" 2>/dev/null || true
+
+      - name: Comment recovery steps
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment "${{ steps.pr.outputs.number }}" --body "$(cat <<EOF
+          ## Auto Fail-Safe Bot
+
+          PR Automation failed for **${{ steps.context.outputs.title }}**.
+
+          **Actions taken**
+          - Added \`fail-safe:blocked\` label to stop unsafe auto-merge
+          - Left PR open for manual review
+
+          **Recovery**
+          1. Inspect the failed run: ${{ steps.context.outputs.run_url }}
+          2. Fix conflicts or checks on branch \`${{ steps.context.outputs.head_ref }}\`
+          3. Remove the \`fail-safe:blocked\` label when safe to resume automation
+          4. Re-run automation:
+             \`\`\`bash
+             gh workflow run pr-automation.yml -f pr_number=${{ steps.pr.outputs.number }}
+             \`\`\`
+
+          **Manual merge (last resort)**
+          \`\`\`bash
+          gh pr merge ${{ steps.pr.outputs.number }} --merge --delete-branch
+          \`\`\`
+          EOF
+          )"
+
+      - name: Retry automation once
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sleep 15
+          gh workflow run pr-automation.yml -f "pr_number=${{ steps.pr.outputs.number }}" || true
