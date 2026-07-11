@@ -4,6 +4,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
+  check_suite:
+    types: [completed]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -15,10 +17,15 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: pr-automation-${{ github.event.pull_request.number || github.event.check_suite.head_branch || inputs.pr_number }}
+  cancel-in-progress: false
+
 jobs:
   automate:
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'check_suite' ||
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     env:
@@ -26,15 +33,26 @@ jobs:
     steps:
       - name: Resolve PR number
         id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "number=${{ inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "check_suite" ]]; then
+            branch="${{ github.event.check_suite.head_branch }}"
+            number="$(gh pr list --head "$branch" --state open --json number -q '.[0].number')"
+            if [[ -z "$number" || "$number" == "null" ]]; then
+              echo "No open PR found for branch $branch"
+              exit 0
+            fi
+            echo "number=$number" >> "$GITHUB_OUTPUT"
           else
             echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Get PR metadata
         id: meta
+        if: steps.pr.outputs.number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -61,7 +79,7 @@ jobs:
           echo "Skipping automation (state=${{ steps.meta.outputs.state }}, cross_repo=${{ steps.meta.outputs.is_cross_repo }})."
 
       - name: Mark draft PR ready for review
-        if: steps.meta.outputs.should_automate == 'true' && steps.meta.outputs.is_draft == 'true'
+        if: steps.meta.outputs.should_automate == 'true' && steps.meta.outputs.is_draft == 'true' && github.event_name != 'check_suite'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -69,7 +87,7 @@ jobs:
           echo "Marked PR #${{ steps.pr.outputs.number }} as ready for review."
 
       - name: Checkout PR branch
-        if: steps.meta.outputs.should_automate == 'true'
+        if: steps.meta.outputs.should_automate == 'true' && github.event_name != 'check_suite'
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.meta.outputs.head_ref }}
@@ -78,7 +96,7 @@ jobs:
 
       - name: Auto-resolve conflicts with main
         id: resolve
-        if: steps.meta.outputs.should_automate == 'true'
+        if: steps.meta.outputs.should_automate == 'true' && github.event_name != 'check_suite'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -110,20 +128,20 @@ jobs:
             echo "pushed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Wait for GitHub merge state
+      - name: Wait for mergeable PR
         if: steps.meta.outputs.should_automate == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pr="${{ steps.pr.outputs.number }}"
-          for attempt in 1 2 3 4 5; do
+          for attempt in $(seq 1 30); do
             state="$(gh pr view "$pr" --json mergeable,mergeStateStatus -q '.mergeStateStatus')"
             mergeable="$(gh pr view "$pr" --json mergeable,mergeStateStatus -q '.mergeable')"
             echo "Attempt $attempt: mergeStateStatus=$state mergeable=$mergeable"
-            if [[ "$state" == "CLEAN" && "$mergeable" == "MERGEABLE" ]]; then
+            if [[ "$mergeable" == "MERGEABLE" && "$state" != "DIRTY" && "$state" != "BEHIND" && "$state" != "DRAFT" ]]; then
               exit 0
             fi
-            sleep 5
+            sleep 10
           done
           echo "PR is not mergeable yet."
           exit 1
@@ -145,7 +163,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           body="PR Automation completed for **${{ steps.meta.outputs.title }}**."
-          if [[ "${{ steps.resolve.outputs.pushed }}" == "true" ]]; then
+          if [[ "${{ steps.resolve.outputs.pushed || 'false' }}" == "true" ]]; then
             body="${body}
 
           - Auto-resolved conflicts with \`main\` (kept PR branch changes)"
