@@ -35,6 +35,10 @@ now_iso() {
 
 init_state() {
   if [[ ! -f "$STATE_FILE" ]]; then
+    if ! command -v jq >/dev/null 2>&1; then
+      echo "Error: jq is required but not installed." >&2
+      exit 1
+    fi
     jq -n '{failures: 0, circuit_open: false, last_failure: null, last_success: null}' >"$STATE_FILE"
   fi
 }
@@ -73,7 +77,7 @@ record_failure() {
   write_state "$failures" "$circuit_open" "$(now_iso)" "$(jq -r '.last_success // empty' "$STATE_FILE")"
 }
 
-circuit_open() {
+circuit_is_open() {
   [[ "$(jq -r '.circuit_open' "$STATE_FILE")" == "true" ]]
 }
 
@@ -99,7 +103,7 @@ retry_run() {
       return 0
     fi
     record_failure
-    if circuit_open; then
+    if circuit_is_open; then
       dead_letter "circuit-open" "$*"
       echo "Error: circuit breaker open after $CIRCUIT_THRESHOLD failures." >&2
       return 1
@@ -148,7 +152,7 @@ cmd_run() {
     echo "Usage: $0 run <command> [args...]" >&2
     exit 1
   fi
-  if circuit_open; then
+  if circuit_is_open; then
     dead_letter "circuit-open" "$*"
     echo "Error: circuit breaker is open. Run '$0 reset' after fixing the issue." >&2
     exit 1
@@ -157,7 +161,7 @@ cmd_run() {
 }
 
 cmd_relay() {
-  if circuit_open; then
+  if circuit_is_open; then
     dead_letter "circuit-open" "${1:-stdin-json}"
     echo "Error: circuit breaker is open. Run '$0 reset' after fixing the issue." >&2
     exit 1
@@ -186,7 +190,7 @@ cmd_relay() {
 }
 
 cmd_status() {
-  read_state
+  init_state
   echo "Fail-safe state ($STATE_FILE):"
   jq . "$STATE_FILE"
   local count

@@ -149,6 +149,10 @@ jobs:
             if [[ "$mergeable" == "MERGEABLE" && "$state" != "DIRTY" && "$state" != "BEHIND" && "$state" != "DRAFT" ]]; then
               exit 0
             fi
+            if [[ "$mergeable" == "CONFLICTING" || "$state" == "DIRTY" ]]; then
+              echo "PR has unresolved conflicts."
+              exit 1
+            fi
             sleep 10
           done
           echo "PR is not mergeable yet."
