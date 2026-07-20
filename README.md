@@ -102,6 +102,8 @@ export FAILSAFE_FALLBACK_API_KEY="your-fallback-key"
 
 Remove `fail-safe:blocked` when the PR is safe to automate again.
 
+**Fail-safe recovery flow:** On PR Automation failure, the bot retries once *before* adding `fail-safe:blocked`. If the retry succeeds, no label is added.
+
 ### 4. Teammates cannot follow up in automation threads
 
 **Cause:** Known bug — Team Followups does not apply to agents created by automations.

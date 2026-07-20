@@ -14,7 +14,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  actions: read
+  actions: write
 
 jobs:
   fail-safe:
@@ -35,14 +35,8 @@ jobs:
 
           run_id="${{ github.event.workflow_run.id }}"
           run_json="$(gh api "repos/${{ github.repository }}/actions/runs/${run_id}")"
-          event="${{ github.event.workflow_run.event }}"
           head_branch="$(echo "$run_json" | jq -r '.head_branch')"
-
-          if [[ "$event" == "pull_request" ]]; then
-            number="$(gh pr list --head "$head_branch" --state open --json number -q '.[0].number')"
-          else
-            number="$(gh pr list --head "$head_branch" --state open --json number -q '.[0].number')"
-          fi
+          number="$(gh pr list --head "$head_branch" --state open --json number -q '.[0].number')"
 
           if [[ -z "$number" || "$number" == "null" ]]; then
             echo "No open PR found for failed workflow on branch $head_branch"
@@ -69,19 +63,48 @@ jobs:
             echo "run_url=manual-trigger" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Block unsafe auto-merge
+      - name: Retry automation once
+        id: retry
         if: steps.pr.outputs.number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pr="${{ steps.pr.outputs.number }}"
-          gh pr edit "$pr" --add-label "fail-safe:blocked" || \
-            gh label create "fail-safe:blocked" --color "B60205" --description "Auto-merge blocked by fail-safe bot" && \
+          head_ref="${{ steps.context.outputs.head_ref }}"
+
+          gh workflow run pr-automation.yml -f "pr_number=${pr}"
+
+          for attempt in $(seq 1 18); do
+            sleep 10
+            conclusion="$(gh run list --workflow=pr-automation.yml --branch="$head_ref" --limit 1 --json conclusion -q '.[0].conclusion')"
+            status="$(gh run list --workflow=pr-automation.yml --branch="$head_ref" --limit 1 --json status -q '.[0].status')"
+            echo "Retry watch $attempt: status=$status conclusion=$conclusion"
+            if [[ "$status" == "completed" && "$conclusion" == "success" ]]; then
+              echo "recovered=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ "$status" == "completed" && "$conclusion" == "failure" ]]; then
+              echo "recovered=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          echo "recovered=false" >> "$GITHUB_OUTPUT"
+
+      - name: Block unsafe auto-merge
+        if: steps.pr.outputs.number != '' && steps.retry.outputs.recovered != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr="${{ steps.pr.outputs.number }}"
+          if ! gh pr edit "$pr" --add-label "fail-safe:blocked" 2>/dev/null; then
+            gh label create "fail-safe:blocked" --color "B60205" --description "Auto-merge blocked by fail-safe bot" || true
             gh pr edit "$pr" --add-label "fail-safe:blocked"
+          fi
           gh pr ready "$pr" 2>/dev/null || true
 
       - name: Comment recovery steps
-        if: steps.pr.outputs.number != ''
+        if: steps.pr.outputs.number != '' && steps.retry.outputs.recovered != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -91,6 +114,7 @@ jobs:
           PR Automation failed for **${{ steps.context.outputs.title }}**.
 
           **Actions taken**
+          - Retried PR Automation once (still failing)
           - Added \`fail-safe:blocked\` label to stop unsafe auto-merge
           - Left PR open for manual review
 
@@ -110,10 +134,10 @@ jobs:
           EOF
           )"
 
-      - name: Retry automation once
-        if: steps.pr.outputs.number != ''
+      - name: Comment successful recovery
+        if: steps.pr.outputs.number != '' && steps.retry.outputs.recovered == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          sleep 15
-          gh workflow run pr-automation.yml -f "pr_number=${{ steps.pr.outputs.number }}" || true
+          gh pr comment "${{ steps.pr.outputs.number }}" --body \
+            "Auto Fail-Safe Bot recovered PR Automation after one retry. No blocking label was added."
