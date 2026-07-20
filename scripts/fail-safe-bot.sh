@@ -9,6 +9,7 @@
 #   EOF
 #   ./scripts/fail-safe-bot.sh status
 #   ./scripts/fail-safe-bot.sh reset
+#   ./scripts/fail-safe-bot.sh agent --pr-url URL --branch BRANCH --prompt "fix ..."
 #
 # Environment:
 #   FAILSAFE_MAX_RETRIES=3
@@ -16,6 +17,7 @@
 #   FAILSAFE_CIRCUIT_THRESHOLD=5
 #   FAILSAFE_STATE_DIR=.failsafe
 #   FAILSAFE_FALLBACK_WEBHOOK_URL (optional secondary Cursor webhook)
+#   CURSOR_API_KEY (required for agent launches)
 
 set -euo pipefail
 
@@ -203,15 +205,25 @@ cmd_reset() {
   echo "Fail-safe circuit breaker reset."
 }
 
+cmd_agent() {
+  if circuit_is_open; then
+    dead_letter "circuit-open" "agent $*"
+    echo "Error: circuit breaker is open. Run '$0 reset' after fixing the issue." >&2
+    exit 1
+  fi
+  retry_run "$SCRIPT_DIR/launch-cursor-agent.sh" "$@"
+}
+
 init_state
 
 case "${1:-}" in
   run) shift; cmd_run "$@" ;;
   relay) shift; cmd_relay "$@" ;;
+  agent) shift; cmd_agent "$@" ;;
   status) cmd_status ;;
   reset) cmd_reset ;;
   *)
-    echo "Usage: $0 {run|relay|status|reset}" >&2
+    echo "Usage: $0 {run|relay|agent|status|reset}" >&2
     exit 1
     ;;
 esac

@@ -51,7 +51,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pr="${{ steps.pr.outputs.number }}"
-          pr_json="$(gh pr view "$pr" --json title,url,headRefName,labels)"
+          pr_json="$(gh pr view "$pr" --json title,url,headRefName,labels,body)"
           echo "title=$(echo "$pr_json" | jq -r '.title')" >> "$GITHUB_OUTPUT"
           echo "url=$(echo "$pr_json" | jq -r '.url')" >> "$GITHUB_OUTPUT"
           echo "head_ref=$(echo "$pr_json" | jq -r '.headRefName')" >> "$GITHUB_OUTPUT"
@@ -59,8 +59,28 @@ jobs:
           run_id="${{ github.event.workflow_run.id }}"
           if [[ -n "$run_id" ]]; then
             echo "run_url=https://github.com/${{ github.repository }}/actions/runs/${run_id}" >> "$GITHUB_OUTPUT"
+            echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           else
             echo "run_url=manual-trigger" >> "$GITHUB_OUTPUT"
+            echo "run_id=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Collect failed job logs
+        id: logs
+        if: steps.pr.outputs.number != '' && steps.context.outputs.run_id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          run_id="${{ steps.context.outputs.run_id }}"
+          mkdir -p /tmp/failsafe
+          gh run view "$run_id" --log-failed > /tmp/failsafe/failed.log 2>/dev/null || true
+          # Keep prompt size bounded for the agent API.
+          if [[ -s /tmp/failsafe/failed.log ]]; then
+            tail -c 12000 /tmp/failsafe/failed.log > /tmp/failsafe/failed.snip.log
+            echo "has_logs=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No failed log available" > /tmp/failsafe/failed.snip.log
+            echo "has_logs=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Retry automation once
@@ -101,13 +121,99 @@ jobs:
             gh label create "fail-safe:blocked" --color "B60205" --description "Auto-merge blocked by fail-safe bot" || true
             gh pr edit "$pr" --add-label "fail-safe:blocked"
           fi
+          if ! gh pr edit "$pr" --add-label "fail-safe:agent-fixing" 2>/dev/null; then
+            gh label create "fail-safe:agent-fixing" --color "1D76DB" --description "Cursor agent fixing root cause" || true
+            gh pr edit "$pr" --add-label "fail-safe:agent-fixing"
+          fi
           gh pr ready "$pr" 2>/dev/null || true
 
-      - name: Comment recovery steps
+      - name: Checkout scripts
+        if: steps.pr.outputs.number != '' && steps.retry.outputs.recovered != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: true
+
+      - name: Launch Cursor agent to fix root cause
+        id: agent
+        if: steps.pr.outputs.number != '' && steps.retry.outputs.recovered != 'true'
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          CURSOR_AGENT_MODEL: ${{ vars.CURSOR_AGENT_MODEL }}
+          GITHUB_REPOSITORY_URL: https://github.com/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CURSOR_API_KEY:-}" ]]; then
+            echo "CURSOR_API_KEY secret is not set — cannot launch agent."
+            echo "launched=false" >> "$GITHUB_OUTPUT"
+            echo "agent_url=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          chmod +x scripts/launch-cursor-agent.sh
+          mkdir -p /tmp/failsafe
+          if [[ ! -f /tmp/failsafe/failed.snip.log ]]; then
+            echo "No log excerpt available" > /tmp/failsafe/failed.snip.log
+          fi
+          cat > /tmp/failsafe/agent-prompt.txt <<EOF
+          You are the Auto Fail-Safe root-cause fixer for repository ${{ github.repository }}.
+
+          PR Automation failed and a simple retry did not recover it.
+          Fix the ROOT CAUSE on the existing PR branch (do not open a new PR).
+
+          Context:
+          - PR: ${{ steps.context.outputs.url }}
+          - Title: ${{ steps.context.outputs.title }}
+          - Branch: ${{ steps.context.outputs.head_ref }}
+          - Failed run: ${{ steps.context.outputs.run_url }}
+
+          Failed workflow log excerpt:
+          \`\`\`
+          $(cat /tmp/failsafe/failed.snip.log 2>/dev/null || echo "No log excerpt available")
+          \`\`\`
+
+          Required outcome:
+          1. Identify why PR Automation / CI failed (workflow YAML, script bug, merge conflict, permissions, etc.).
+          2. Implement the minimal fix on branch \`${{ steps.context.outputs.head_ref }}\`.
+          3. Validate with bash -n / relevant checks.
+          4. Commit and push to the same PR branch.
+          5. Remove labels \`fail-safe:blocked\` and \`fail-safe:agent-fixing\` when the fix is in place.
+          6. Comment on the PR with what you fixed and that automation can resume.
+          7. Re-run PR automation:
+             gh workflow run pr-automation.yml -f pr_number=${{ steps.pr.outputs.number }}
+
+          Constraints:
+          - Work on the existing PR branch only (workOnCurrentBranch).
+          - Do not invent unrelated product features.
+          - Prefer fixing automation/workflow/script root causes first.
+          EOF
+
+          response="$(./scripts/launch-cursor-agent.sh \
+            --pr-url "${{ steps.context.outputs.url }}" \
+            --branch "${{ steps.context.outputs.head_ref }}" \
+            --name "Fail-safe root cause #${{ steps.pr.outputs.number }}" \
+            --prompt-file /tmp/failsafe/agent-prompt.txt)"
+
+          echo "$response"
+          agent_url="$(echo "$response" | jq -r 'objects | .agent.url // empty' | tail -1)"
+          if [[ -z "$agent_url" ]]; then
+            agent_url="$(echo "$response" | sed -n 's/^Launched Cursor agent: //p' | tail -1)"
+          fi
+          echo "launched=true" >> "$GITHUB_OUTPUT"
+          echo "agent_url=${agent_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Comment recovery steps + agent link
         if: steps.pr.outputs.number != '' && steps.retry.outputs.recovered != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          agent_line="Cursor agent launch skipped (set repository secret \`CURSOR_API_KEY\`)."
+          if [[ "${{ steps.agent.outputs.launched }}" == "true" ]]; then
+            agent_line="Launched Cursor agent: ${{ steps.agent.outputs.agent_url }}"
+          fi
+
           gh pr comment "${{ steps.pr.outputs.number }}" --body "$(cat <<EOF
           ## Auto Fail-Safe Bot
 
@@ -115,19 +221,16 @@ jobs:
 
           **Actions taken**
           - Retried PR Automation once (still failing)
-          - Added \`fail-safe:blocked\` label to stop unsafe auto-merge
-          - Left PR open for manual review
+          - Added \`fail-safe:blocked\` to pause unsafe auto-merge
+          - Added \`fail-safe:agent-fixing\`
+          - ${agent_line}
 
-          **Recovery**
-          1. Inspect the failed run: ${{ steps.context.outputs.run_url }}
-          2. Fix conflicts or checks on branch \`${{ steps.context.outputs.head_ref }}\`
-          3. Remove the \`fail-safe:blocked\` label when safe to resume automation
-          4. Re-run automation:
-             \`\`\`bash
-             gh workflow run pr-automation.yml -f pr_number=${{ steps.pr.outputs.number }}
-             \`\`\`
+          **What the agent will do**
+          1. Inspect failed run: ${{ steps.context.outputs.run_url }}
+          2. Fix root cause on \`${{ steps.context.outputs.head_ref }}\`
+          3. Push the fix, remove fail-safe labels, re-run PR Automation
 
-          **Manual merge (last resort)**
+          **Manual override**
           \`\`\`bash
           gh pr merge ${{ steps.pr.outputs.number }} --merge --delete-branch
           \`\`\`
@@ -140,4 +243,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr comment "${{ steps.pr.outputs.number }}" --body \
-            "Auto Fail-Safe Bot recovered PR Automation after one retry. No blocking label was added."
+            "Auto Fail-Safe Bot recovered PR Automation after one retry. No agent was needed."
