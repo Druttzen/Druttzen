@@ -1,0 +1,19 @@
+---
+description: Instructions for fail-safe root-cause fix agents
+globs:
+alwaysApply: false
+---
+
+# Fail-safe root-cause agent
+
+When launched by Auto Fail-Safe Bot:
+
+1. Work on the existing PR branch only.
+2. Fix the automation/workflow/script root cause that made PR Automation fail.
+3. Validate changes (`bash -n` for shell, workflow YAML sanity).
+4. Commit and push to the same branch.
+5. Remove `fail-safe:blocked` and `fail-safe:agent-fixing` labels.
+6. Comment on the PR with the fix summary.
+7. Re-run: `gh workflow run pr-automation.yml -f pr_number=<n>`
+
+Do not invent product features or edit unrelated docs.

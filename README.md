@@ -102,7 +102,28 @@ export FAILSAFE_FALLBACK_API_KEY="your-fallback-key"
 
 Remove `fail-safe:blocked` when the PR is safe to automate again.
 
-**Fail-safe recovery flow:** On PR Automation failure, the bot retries once *before* adding `fail-safe:blocked`. If the retry succeeds, no label is added.
+**Fail-safe recovery flow:** On PR Automation failure, the bot retries once *before* adding `fail-safe:blocked`. If the retry succeeds, no label is added. If the retry still fails, it launches a **Cursor Cloud Agent** to fix the root cause on the same PR branch.
+
+### Auto root-cause agent (required secret)
+
+1. Create an API key at [Cursor Dashboard → API Keys](https://cursor.com/dashboard?tab=api-keys)
+2. Add GitHub repository secret: `CURSOR_API_KEY`
+3. Optional repository variable: `CURSOR_AGENT_MODEL` (model id)
+
+When PR Automation fails after retry:
+
+1. Labels: `fail-safe:blocked` + `fail-safe:agent-fixing`
+2. Launches agent via Cloud Agents API (`scripts/launch-cursor-agent.sh`)
+3. Agent works on the **existing PR branch**, pushes fix, removes labels, re-runs PR Automation
+
+```bash
+# Manual launch
+export CURSOR_API_KEY="..."
+./scripts/launch-cursor-agent.sh \
+  --pr-url "https://github.com/Druttzen/Druttzen/pull/123" \
+  --branch "cursor/example-a294" \
+  --prompt "Fix the failing PR Automation root cause on this branch"
+```
 
 ### 4. Teammates cannot follow up in automation threads
 
