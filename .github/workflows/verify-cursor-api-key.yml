@@ -1,0 +1,32 @@
+name: Verify Cursor API Key
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CURSOR_API_KEY is configured
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+        run: |
+          if [[ -n "${CURSOR_API_KEY:-}" ]]; then
+            echo "CURSOR_API_KEY is set (length=${#CURSOR_API_KEY})"
+            # Probe Agents API auth without creating an agent
+            status="$(curl -sS -o /tmp/cursor-auth.json -w '%{http_code}' \
+              -u "${CURSOR_API_KEY}:" \
+              --connect-timeout 5 --max-time 20 \
+              https://api.cursor.com/v1/models || true)"
+            echo "Cursor API auth probe HTTP status: $status"
+            if [[ "$status" == "200" ]]; then
+              echo "Cursor API key is valid."
+              exit 0
+            fi
+            echo "Secret exists but API auth failed. Response:"
+            cat /tmp/cursor-auth.json || true
+            exit 1
+          else
+            echo "CURSOR_API_KEY secret is missing or empty."
+            exit 1
+          fi
